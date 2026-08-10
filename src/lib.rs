@@ -1,7 +1,6 @@
 //! imagex - An high-performance image processing library.
 //!
-//! Features flat row-major memory layout, configurable SIMD stride alignment,
-//! zero-copy access, and parallel iteration support.
+//! Features flat row-major memory layout, configurable SIMD stride alignment, zero-copy access, and parallel iteration support.
 pub mod pixel;
 pub mod rgb;
 pub mod rgba;
