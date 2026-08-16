@@ -8,3 +8,6 @@ keywords = ["image"]
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/0xhappyboy/imagex"
+
+[dependencies]
+miniz_oxide = "0.9.1"

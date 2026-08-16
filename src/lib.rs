@@ -1,13 +1,30 @@
-//! imagex - An high-performance image processing library.
+//! imagex - A high-performance image processing library.
 //!
-//! Features flat row-major memory layout, configurable SIMD stride alignment, zero-copy access, and parallel iteration support.
+//! Features flat row-major memory layout, configurable SIMD stride alignment,
+//! zero-copy access, and parallel iteration support.
+//!
+//! # Example
+//! ```
+//! use imagex::Imagex;
+//!
+//! let mut img = Imagex::new(1920, 1080);
+//! img.fill(&imagex::Rgba::new(255, 0, 0, 255));
+//! assert_eq!(img.width(), 1920);
+//! assert_eq!(img.height(), 1080);
+//! ```
+pub mod decode;
+pub mod encode;
 pub mod pixel;
 pub mod rgb;
 pub mod rgba;
+pub mod types;
+pub use decode::*;
+pub use encode::*;
 pub use pixel::*;
 pub use rgb::*;
 pub use rgba::*;
 use std::marker::PhantomData;
+pub use types::*;
 /// Optimized image buffer designed for video processing workflows
 ///
 /// `Imagex` manages a flat RGBA pixel buffer in row-major order with
@@ -42,6 +59,8 @@ pub struct Imagex {
     height: u32,
     /// Number of bytes per row (width * 4, may include padding)
     stride: u32,
+    /// Image metadata (populated when loaded from file)
+    pub info: Option<ImageInfo>,
 }
 impl Imagex {
     /// Creates a new image buffer with default stride alignment (16 bytes)
@@ -64,6 +83,7 @@ impl Imagex {
             width,
             height,
             stride,
+            info: None,
         }
     }
     /// Creates a new image buffer with custom stride alignment
@@ -84,6 +104,7 @@ impl Imagex {
             width,
             height,
             stride: stride as u32,
+            info: None,
         }
     }
     /// Creates an image buffer from raw RGBA data
@@ -176,15 +197,13 @@ impl Imagex {
     /// # Safety
     /// Caller must ensure `x < width` and `y < height`
     #[inline]
-    pub fn get_pixel_unchecked(&self, x: u32, y: u32) -> Rgba {
+    pub unsafe fn get_pixel_unchecked(&self, x: u32, y: u32) -> Rgba {
         let idx = (y as usize) * (self.stride as usize) + (x as usize) * 4;
-        unsafe {
-            Rgba {
-                r: *self.data.get_unchecked(idx),
-                g: *self.data.get_unchecked(idx + 1),
-                b: *self.data.get_unchecked(idx + 2),
-                a: *self.data.get_unchecked(idx + 3),
-            }
+        Rgba {
+            r: *self.data.get_unchecked(idx),
+            g: *self.data.get_unchecked(idx + 1),
+            b: *self.data.get_unchecked(idx + 2),
+            a: *self.data.get_unchecked(idx + 3),
         }
     }
     /// Sets a pixel at (x, y)
@@ -206,12 +225,10 @@ impl Imagex {
     #[inline]
     pub unsafe fn set_pixel_unchecked(&mut self, x: u32, y: u32, pixel: Rgba) {
         let idx = (y as usize) * (self.stride as usize) + (x as usize) * 4;
-        unsafe {
-            *self.data.get_unchecked_mut(idx) = pixel.r;
-            *self.data.get_unchecked_mut(idx + 1) = pixel.g;
-            *self.data.get_unchecked_mut(idx + 2) = pixel.b;
-            *self.data.get_unchecked_mut(idx + 3) = pixel.a;
-        }
+        *self.data.get_unchecked_mut(idx) = pixel.r;
+        *self.data.get_unchecked_mut(idx + 1) = pixel.g;
+        *self.data.get_unchecked_mut(idx + 2) = pixel.b;
+        *self.data.get_unchecked_mut(idx + 3) = pixel.a;
     }
     /// Gets a mutable reference to a pixel at (x, y)
     ///
@@ -355,5 +372,180 @@ impl Imagex {
 impl Default for Imagex {
     fn default() -> Self {
         Self::new(1, 1)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::time::Instant;
+    #[test]
+    fn test_read_local_image() {
+        let path = "C:\\Users\\admin\\Downloads\\f9d5452a-9273-40ef-a43e-08b1f0d418b5.png";
+        if !Path::new(path).exists() {
+            eprintln!("Skipping test: file not found -> {}", path);
+            return;
+        }
+        let img = Imagex::read(path).unwrap();
+        println!(
+            "\nImage info: {}x{} ({} pixels)",
+            img.width(),
+            img.height(),
+            img.pixel_count()
+        );
+        let start = Instant::now();
+        let mut count = 0;
+        for pixel in img.pixels() {
+            let _ = pixel.r;
+            count += 1;
+        }
+        let duration = start.elapsed();
+        let total_pixels = img.pixel_count() as usize;
+        assert_eq!(count, total_pixels);
+        let ms = duration.as_secs_f64() * 1000.0;
+        let fps = total_pixels as f64 / duration.as_secs_f64();
+        let mb_per_sec = (total_pixels as f64 * 4.0) / (duration.as_secs_f64() * 1024.0 * 1024.0);
+        println!(
+            "Read-only iteration: {:.2}ms ({:.0} px/s, {:.2} MB/s)",
+            ms, fps, mb_per_sec
+        );
+        let mut img_mut = img.clone();
+        let start = Instant::now();
+        for mut pixel in img_mut.pixels_mut() {
+            *pixel.r = 0; // Modify red channel
+        }
+        let duration = start.elapsed();
+        let ms = duration.as_secs_f64() * 1000.0;
+        let fps = total_pixels as f64 / duration.as_secs_f64();
+        let mb_per_sec = (total_pixels as f64 * 4.0) / (duration.as_secs_f64() * 1024.0 * 1024.0);
+        println!(
+            "Read-write iteration: {:.2}ms ({:.0} px/s, {:.2} MB/s)",
+            ms, fps, mb_per_sec
+        );
+        let start = Instant::now();
+        let mut sum: u64 = 0;
+        for y in 0..img.height() {
+            let row = img.row(y);
+            for chunk in row.chunks_exact(4) {
+                sum += chunk[0] as u64; // Sum red channel
+            }
+        }
+        let duration = start.elapsed();
+        let ms = duration.as_secs_f64() * 1000.0;
+        let fps = total_pixels as f64 / duration.as_secs_f64();
+        let mb_per_sec = (total_pixels as f64 * 4.0) / (duration.as_secs_f64() * 1024.0 * 1024.0);
+        println!(
+            "Row-based iteration: {:.2}ms ({:.0} px/s, {:.2} MB/s)",
+            ms, fps, mb_per_sec
+        );
+        println!("   (Red channel sum: {})", sum);
+        let start = Instant::now();
+        let mut img_fill = Imagex::new(img.width(), img.height());
+        img_fill.fill(&Rgba::new(255, 0, 0, 255));
+        let duration = start.elapsed();
+        let ms = duration.as_secs_f64() * 1000.0;
+        let mb_per_sec = (total_pixels as f64 * 4.0) / (duration.as_secs_f64() * 1024.0 * 1024.0);
+        println!("Fill operation: {:.2}ms ({:.2} MB/s)", ms, mb_per_sec);
+    }
+    #[test]
+    fn test_write_local_image() {
+        use std::time::Instant;
+        let src_path = "C:\\Users\\admin\\Downloads\\a (2).png";
+        if !Path::new(src_path).exists() {
+            eprintln!("Skipping test: source file not found -> {}", src_path);
+            return;
+        }
+        let start_decode = Instant::now();
+        let mut img = Imagex::read(src_path).unwrap();
+        let decode_duration = start_decode.elapsed();
+        println!(
+            "\nSource image: {}x{} ({} pixels)",
+            img.width(),
+            img.height(),
+            img.pixel_count()
+        );
+        println!(
+            "Decode time: {:.2}ms",
+            decode_duration.as_secs_f64() * 1000.0
+        );
+        let start_modify = Instant::now();
+        let cx = img.width() / 2;
+        let cy = img.height() / 2;
+        // Get original center pixel for debugging
+        let orig_center = img.get_pixel(cx, cy);
+        println!(
+            "Original center pixel: ({}, {}, {}, {})",
+            orig_center.r, orig_center.g, orig_center.b, orig_center.a
+        );
+        img.set_pixel(cx, cy, Rgba::new(255, 0, 0, 255));
+        let modify_duration = start_modify.elapsed();
+        println!(
+            "Modify pixels time: {:.2}ms",
+            modify_duration.as_secs_f64() * 1000.0
+        );
+        let out_dir = "C:\\Users\\admin\\Downloads\\output-img";
+        std::fs::create_dir_all(out_dir).unwrap();
+        let start_encode = Instant::now();
+        let png_path = format!("{}\\test1.png", out_dir);
+        img.write(&png_path, ImageFormat::Png).unwrap();
+        let encode_duration = start_encode.elapsed();
+        println!(
+            "Encode time: {:.2}ms",
+            encode_duration.as_secs_f64() * 1000.0
+        );
+        let png_meta = std::fs::metadata(&png_path).unwrap();
+        println!("PNG exported: {}", png_path);
+        println!("   PNG size: {} bytes", png_meta.len());
+        let start_roundtrip = Instant::now();
+        let img_roundtrip = Imagex::read(&png_path).unwrap();
+        let roundtrip_duration = start_roundtrip.elapsed();
+        println!(
+            "Round-trip decode time: {:.2}ms",
+            roundtrip_duration.as_secs_f64() * 1000.0
+        );
+        assert_eq!(img.width(), img_roundtrip.width());
+        assert_eq!(img.height(), img_roundtrip.height());
+        println!("Round-trip verification passed: dimensions match");
+        let pixel_center = img_roundtrip.get_pixel(cx, cy);
+        assert_eq!(pixel_center, Rgba::new(255, 0, 0, 255));
+        println!("Center pixel verified: RED");
+        let pixel_tl = img_roundtrip.get_pixel(0, 0);
+        let orig_tl = img.get_pixel(0, 0);
+        assert_eq!(pixel_tl, orig_tl);
+        println!(
+            "Top-left corner unchanged: ({}, {}, {}, {})",
+            pixel_tl.r, pixel_tl.g, pixel_tl.b, pixel_tl.a
+        );
+        let pixel_10 = img_roundtrip.get_pixel(10, 10);
+        let orig_10 = img.get_pixel(10, 10);
+        assert_eq!(pixel_10, orig_10);
+        println!(
+            "Pixel (10,10) unchanged: ({}, {}, {}, {})",
+            pixel_10.r, pixel_10.g, pixel_10.b, pixel_10.a
+        );
+        let total_time = decode_duration + modify_duration + encode_duration + roundtrip_duration;
+        println!("\nPerformance Summary:");
+        println!(
+            "   Decode:        {:.2}ms",
+            decode_duration.as_secs_f64() * 1000.0
+        );
+        println!(
+            "   Modify pixels: {:.2}ms",
+            modify_duration.as_secs_f64() * 1000.0
+        );
+        println!(
+            "   Encode:        {:.2}ms",
+            encode_duration.as_secs_f64() * 1000.0
+        );
+        println!(
+            "   Round-trip:    {:.2}ms",
+            roundtrip_duration.as_secs_f64() * 1000.0
+        );
+        println!(
+            "   Total:         {:.2}ms",
+            total_time.as_secs_f64() * 1000.0
+        );
+        println!("\nOutput file:");
+        println!("   - {}", png_path);
     }
 }
