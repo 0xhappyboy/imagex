@@ -1,33 +1,8 @@
-//! Image decoding module
-//!
-//! Provides unified decode interface with all functions bound to Imagex.
-//! Currently supports PNG and PPM formats with pure Rust implementations.
 use crate::{ColorSpace, ImageFormat, ImageInfo, Imagex};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::Path;
 impl Imagex {
-    /// Read an image from file, auto-detecting format
-    ///
-    /// # Example
-    /// ```
-    /// use imagex::Imagex;
-    ///
-    /// let img = Imagex::read("photo.png").unwrap();
-    /// println!("Image info: {:?}", img.info());
-    /// ```
-    pub fn read<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let path = path.as_ref();
-        let format = ImageFormat::from_path(path.to_str().unwrap_or(""));
-        match format {
-            ImageFormat::Png => Self::read_png(path),
-            ImageFormat::Ppm => Self::read_ppm(path),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Unsupported image format: {}", path.display()),
-            )),
-        }
-    }
     /// Read a PNG image from file
     pub fn read_png<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         use miniz_oxide::inflate::decompress_to_vec_zlib;
@@ -111,7 +86,7 @@ impl Imagex {
                 ),
             ));
         }
-        // Apply PNG filters (Paeth filter decoding)
+        // Apply PNG filters
         let mut raw_data = Vec::with_capacity((height as usize) * stride);
         let mut prev_row = vec![0u8; stride];
         for row in 0..height as usize {
@@ -121,11 +96,9 @@ impl Imagex {
             let mut decoded_row = vec![0u8; stride];
             match filter_byte {
                 0 => {
-                    // None: no filtering
                     decoded_row.copy_from_slice(current_row);
                 }
                 1 => {
-                    // Sub: subtract left pixel
                     for i in 0..stride {
                         let left = if i >= bytes_per_pixel {
                             decoded_row[i - bytes_per_pixel]
@@ -136,13 +109,11 @@ impl Imagex {
                     }
                 }
                 2 => {
-                    // Up: subtract pixel from previous row
                     for i in 0..stride {
                         decoded_row[i] = current_row[i].wrapping_add(prev_row[i]);
                     }
                 }
                 3 => {
-                    // Average: (left + up) / 2
                     for i in 0..stride {
                         let left = if i >= bytes_per_pixel {
                             decoded_row[i - bytes_per_pixel]
@@ -155,7 +126,6 @@ impl Imagex {
                     }
                 }
                 4 => {
-                    // Paeth: predictor function
                     for i in 0..stride {
                         let left = if i >= bytes_per_pixel {
                             decoded_row[i - bytes_per_pixel]
@@ -186,7 +156,6 @@ impl Imagex {
         let pixel_data = if has_alpha {
             raw_data
         } else {
-            // Convert RGB to RGBA (add alpha = 255)
             let mut rgba = Vec::with_capacity(raw_data.len() / 3 * 4);
             for chunk in raw_data.chunks_exact(3) {
                 rgba.push(chunk[0]);
@@ -227,77 +196,5 @@ impl Imagex {
         } else {
             upper_left
         }
-    }
-    /// Read a PPM image from file (P6 binary format)
-    pub fn read_ppm<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        // Read magic number
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let magic = line.trim();
-        if magic != "P6" {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Only P6 format is supported, got: {}", magic),
-            ));
-        }
-        // Skip comments
-        let mut line = String::new();
-        loop {
-            line.clear();
-            reader.read_line(&mut line)?;
-            if !line.starts_with('#') {
-                break;
-            }
-        }
-        // Read dimensions
-        let dims: Vec<&str> = line.trim().split_whitespace().collect();
-        if dims.len() < 2 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid PPM header: missing width/height",
-            ));
-        }
-        let width: u32 = dims[0]
-            .parse()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid width"))?;
-        let height: u32 = dims[1]
-            .parse()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid height"))?;
-        // Read max value
-        let mut max_val = String::new();
-        reader.read_line(&mut max_val)?;
-        let _max: u32 = max_val.trim().parse().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid max color value")
-        })?;
-        // Read pixel data
-        let pixel_count = (width * height) as usize;
-        let mut rgb_data = vec![0u8; pixel_count * 3];
-        reader.read_exact(&mut rgb_data)?;
-        let info = ImageInfo {
-            width,
-            height,
-            format: ImageFormat::Ppm,
-            color_space: ColorSpace::Rgb,
-            bit_depth: 8,
-            has_alpha: false,
-            compression: None,
-        };
-        let mut img = Self::from_rgb8(&rgb_data, width, height);
-        img.info = Some(info);
-        Ok(img)
-    }
-    /// Get image metadata
-    pub fn info(&self) -> Option<&ImageInfo> {
-        self.info.as_ref()
-    }
-    /// Get image format
-    pub fn format(&self) -> Option<ImageFormat> {
-        self.info.as_ref().map(|info| info.format)
-    }
-    /// Check if image has alpha channel
-    pub fn has_alpha(&self) -> bool {
-        self.info.as_ref().map_or(false, |info| info.has_alpha)
     }
 }
